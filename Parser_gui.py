@@ -48,19 +48,19 @@ def process_row(row_data, column_indices, file_specific_data):
     if len(row_data) <= max(name_idx, length_idx, quantity_idx): return
 
     material_cell_content = str(row_data[name_idx]).strip()
-    
+
     # Ищем первое соответствие шаблону в ячейке
     match = re.search(MATERIAL_REGEX_PATTERN, material_cell_content)
-    
+
     if match:
         # Получаем найденное имя материала (например, "50 х 50 х 3")
         found_name = match.group(1)
         # Нормализуем его: убираем пробелы и меняем запятую на точку для единообразия
         normalized_name = found_name.replace(',', '.').replace(' ', '')
-        
+
         length = parse_value(row_data[length_idx])
         quantity = parse_value(row_data[quantity_idx])
-        
+
         if length > 0 and quantity > 0:
             file_specific_data[normalized_name] += length * quantity
 
@@ -71,7 +71,7 @@ class ParserApp(tk.Tk):
         self.title("Универсальный парсер журналов v4.0")
         self.geometry("800x600")
         self.folder_path = tk.StringVar()
-        
+
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill="both", expand=True)
         top_frame = ttk.Frame(main_frame)
@@ -88,7 +88,7 @@ class ParserApp(tk.Tk):
         self.run_button.pack(fill="x", pady=10)
         self.results_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=20, state="disabled")
         self.results_text.pack(fill="both", expand=True)
-    
+
     def log(self, message):
         self.results_text.config(state="normal")
         self.results_text.insert(tk.END, message + "\n")
@@ -107,12 +107,12 @@ class ParserApp(tk.Tk):
         if not start_path:
             self.log("Ошибка: Папка не выбрана.")
             return
-        
+
         self.results_text.config(state="normal"); self.results_text.delete('1.0', tk.END); self.results_text.config(state="disabled")
         self.run_button.config(state="disabled")
 
         master_data = defaultdict(lambda: defaultdict(float))
-        
+
         self.log(f"Начинаю поиск файлов c '{FILENAME_FILTER_KEYWORD}' в названии...")
         self.log(f"Стартовая директория: {start_path}\n")
 
@@ -124,7 +124,7 @@ class ParserApp(tk.Tk):
 
                     file_path = os.path.join(dirpath, filename)
                     relative_path = os.path.relpath(file_path, start_path)
-                    
+
                     file_specific_data = None
                     if filename.lower().endswith('.xlsx'):
                         self.log(f"[XLSX] Обработка: {relative_path}")
@@ -132,14 +132,14 @@ class ParserApp(tk.Tk):
                     elif filename.lower().endswith('.docx'):
                         self.log(f"[DOCX] Обработка: {relative_path}")
                         file_specific_data = self.parse_docx(file_path)
-                    
+
                     if file_specific_data:
                         files_with_data_count += 1
                         master_data[relative_path] = file_specific_data
-            
+
             self.log("\n-------------------------------------------")
             self.log("--- ИТОГОВЫЙ РАСЧЕТ ПО КАЖДОМУ ФАЙЛУ ---")
-            
+
             if files_with_data_count == 0:
                  self.log(f"Файлы с '{FILENAME_FILTER_KEYWORD}' в названии найдены, но в них нет материалов нужного формата.")
             else:
@@ -149,11 +149,11 @@ class ParserApp(tk.Tk):
                         self.log("  > В этом файле не найдено материалов, соответствующих шаблону.")
                         continue
                     for material, total_length in sorted(file_data.items()):
-                        final_length = total_length * (1 + CONTINGENCY_PERCENTAGE / 100)
+                        final_length = (total_length * (1 + CONTINGENCY_PERCENTAGE / 100)) / 1000
                         self.log(f"  > Наименование: {material}")
-                        self.log(f"    Суммарная длина: {total_length:.2f}")
-                        self.log(f"    Общая длина с запасом ({CONTINGENCY_PERCENTAGE}%): {final_length:.2f}")
-            
+                        self.log(f"    Суммарная длина: {total_length:.3f}м")
+                        self.log(f"    Общая длина с запасом ({CONTINGENCY_PERCENTAGE}%): {final_length:.3f}м")
+
             self.log("\n--- Анализ завершен. ---")
 
         except Exception as e:
