@@ -42,7 +42,7 @@ def natural_sort_key(s):
 class ParserApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Универсальный парсер журналов v10.2 (Без итогов)")
+        self.title("Универсальный парсер журналов v10.5 (Глубина поиска 2)")
         self.geometry("800x600")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.word_app = None
@@ -149,14 +149,29 @@ class ParserApp(tk.Tk):
         self.results_text.config(state="normal"); self.results_text.delete('1.0', tk.END); self.results_text.config(state="disabled")
         self.run_button.config(state="disabled")
         master_data = defaultdict(lambda: defaultdict(float))
-        self.log(f"Начинаю поиск файлов c '{FILENAME_FILTER_KEYWORD}' в названии...")
+        grand_total_data = defaultdict(float)
+        self.log(f"Начинаю поиск файлов c '{FILENAME_FILTER_KEYWORD}' в названии (глубина 2)...")
         try:
             processed_files = []
-            for dirpath, _, filenames in os.walk(start_path):
-                for filename in filenames:
-                    if FILENAME_FILTER_KEYWORD in filename.lower() and not filename.startswith('~'):
-                        processed_files.append(os.path.join(dirpath, filename))
+            ### ИЗМЕНЕНИЕ: Логика поиска с глубиной 2 ###
+            # Уровень 1: выбранная папка
+            for item_name in os.listdir(start_path):
+                item_path = os.path.join(start_path, item_name)
+                # Если это файл, проверяем и добавляем
+                if os.path.isfile(item_path):
+                    if FILENAME_FILTER_KEYWORD in item_name.lower() and not item_name.startswith('~'):
+                        processed_files.append(item_path)
+                # Если это папка, заходим внутрь (Уровень 2)
+                elif os.path.isdir(item_path):
+                    # Проходим по файлам во вложенной папке
+                    for sub_item_name in os.listdir(item_path):
+                        sub_item_path = os.path.join(item_path, sub_item_name)
+                        if os.path.isfile(sub_item_path):
+                            if FILENAME_FILTER_KEYWORD in sub_item_name.lower() and not sub_item_name.startswith('~'):
+                                processed_files.append(sub_item_path)
+
             processed_files.sort(key=natural_sort_key)
+
             for file_path in processed_files:
                 relative_path = os.path.relpath(file_path, start_path)
                 file_ext = os.path.splitext(file_path)[1].lower()
@@ -165,10 +180,14 @@ class ParserApp(tk.Tk):
                 if file_ext == '.xlsx': self.parse_xlsx(file_path, file_specific_data)
                 elif file_ext == '.docx': self.parse_docx(file_path, file_specific_data)
                 elif file_ext == '.doc': self.parse_doc(file_path, file_specific_data)
-                if file_specific_data: master_data[relative_path] = file_specific_data
+
+                if file_specific_data:
+                    master_data[relative_path] = file_specific_data
+                    for material, length in file_specific_data.items():
+                        grand_total_data[material] += length
 
             self.log("\n-------------------------------------------")
-            self.log("--- РАСЧЕТ ПО ВСЕМ ФАЙЛАМ ---")
+            self.log("--- РАСЧЕТ ПО КАЖДОМУ ФАЙЛУ ---")
 
             if not master_data:
                 self.log(f"Материалы не найдены.")
@@ -181,7 +200,6 @@ class ParserApp(tk.Tk):
                         continue
                     sorted_materials = sorted(file_data.items(), key=lambda item: natural_sort_key(item[0]))
 
-                    # ИЗМЕНЕНИЕ: Убраны переменные и блок вывода для итогов
                     for i, (material, total_length) in enumerate(sorted_materials, 1):
                         final_length_with_contingency = total_length * (1 + CONTINGENCY_PERCENTAGE / 100)
                         if material.startswith("Арматура d"):
@@ -191,6 +209,24 @@ class ParserApp(tk.Tk):
                             self.log(f"{i}. Наименование: {material}")
                             self.log(f"   - Суммарная длина (без запаса): {total_length:.3f} м")
                             self.log(f"   - Итоговая длина с запасом ({CONTINGENCY_PERCENTAGE}%): {final_length_with_contingency:.3f} м")
+
+            self.log("\n\n###########################################")
+            self.log("--- ОБЩИЙ ИТОГ ПО ВСЕМ ФАЙЛАМ ---")
+            self.log("###########################################\n")
+
+            if not grand_total_data:
+                self.log("Материалы для итогового подсчета не найдены.")
+            else:
+                sorted_grand_totals = sorted(grand_total_data.items(), key=lambda item: natural_sort_key(item[0]))
+                self.log(f"Общая спецификация (с учетом {CONTINGENCY_PERCENTAGE}% запаса):\n")
+                for i, (material, total_length) in enumerate(sorted_grand_totals, 1):
+                    final_length_with_contingency = total_length * (1 + CONTINGENCY_PERCENTAGE / 100)
+                    if material.startswith("Арматура d"):
+                        length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
+                        self.log(f'{i}. {material}: {length_str} м')
+                    else:
+                        length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
+                        self.log(f'{i}. Профиль {material}: {length_str} м')
 
             self.log("\n\n--- Анализ завершен. ---")
         except Exception as e:
