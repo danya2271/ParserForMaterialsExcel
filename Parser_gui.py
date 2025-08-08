@@ -7,6 +7,8 @@ import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext
 import win32com.client as win32
 from tkinter import messagebox
+import concurrent.futures
+import pythoncom
 
 # --- КОНФИГУРАЦИЯ ---
 NAME_KEYWORDS = ['наименование', 'позиция']
@@ -38,6 +40,129 @@ def parse_value(value):
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', str(s))]
+
+def parse_doc_in_thread(file_path):
+    """
+    Обрабатывает один .doc файл в отдельном потоке, создавая свой экземпляр Word.
+    Возвращает кортеж из пути к файлу и словаря с данными.
+    """
+    pythoncom.CoInitialize()  # Инициализация COM в этом потоке
+    word_app = None
+    file_data = defaultdict(float)
+    error_message = None
+
+    try:
+        try:
+            word_app = win32.Dispatch("Word.Application")
+            word_app.Visible = False
+            word_app.DisplayAlerts = 0
+            word_app.AutomationSecurity = 3
+        except Exception as e:
+            raise Exception(f"Не удалось запустить MS Word: {e}")
+
+        doc = None
+        try:
+            doc = word_app.Documents.Open(
+                os.path.abspath(file_path),
+                ConfirmConversions=False, ReadOnly=True, AddToRecentFiles=False
+            )
+            for table in doc.Tables:
+                try:
+                    header_row = table.Rows(1)
+                    header_values = [cell.Range.Text.strip('\r\x07 ').strip() for cell in header_row.Cells]
+                    column_indices = find_columns_indices(header_values)
+
+                    if column_indices.get('name') is not None and column_indices.get('quantity') is not None:
+                        # Вспомогательная функция для итерации по COM-коллекции
+                        def com_rows_iterator():
+                            for i in range(2, table.Rows.Count + 1):
+                                yield [cell.Range.Text.strip('\r\x07 ').strip() for cell in table.Rows(i).Cells]
+
+                        # Внутренняя функция для обработки строк (аналог _process_table_iterator)
+                        last_material_name = ""
+                        name_idx = column_indices['name']
+                        for row_data in com_rows_iterator():
+                            if not any(v for v in row_data if v and str(v).strip()): continue
+
+                            processed_row_data = list(row_data)
+                            if len(processed_row_data) <= name_idx: continue
+
+                            name_cell_value = str(processed_row_data[name_idx]).strip()
+                            if name_cell_value:
+                                last_material_name = name_cell_value
+                            else:
+                                processed_row_data[name_idx] = last_material_name
+
+                            # Внутренняя функция для обработки одной строки (аналог _process_row)
+                            # --- Код из _process_row вставлен сюда для простоты ---
+                            name_idx_p, material_idx_p, length_col_idx_p, quantity_hdr_idx_p = (
+                                column_indices.get('name'), column_indices.get('material'),
+                                column_indices.get('length'), column_indices.get('quantity')
+                            )
+                            if name_idx_p is None or quantity_hdr_idx_p is None: continue
+
+                            name_content = str(processed_row_data[name_idx_p]).strip() if len(processed_row_data) > name_idx_p else ""
+                            if not name_content: continue
+
+                            search_text = name_content
+                            if material_idx_p is not None and len(processed_row_data) > material_idx_p:
+                                search_text += " " + str(processed_row_data[material_idx_p]).strip()
+
+                            if EXCLUDE_KEYWORD in search_text.lower(): continue
+
+                            rebar_pattern = r'[АаAa][54]00[СсСc]?.*?(?:диаметр|d|D|⌀|ø)\s*(\d+(?:,\d+)?).*?L\s*=\s*(\d+)'
+                            profile_with_l_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2}).*?L\s*=\s*(\d+)'
+                            standard_profile_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2})'
+                            quantity = 0
+                            is_short_row = "L=" in name_content.upper() and len(processed_row_data) < quantity_hdr_idx_p
+
+                            if is_short_row:
+                                if len(processed_row_data) > 1: quantity = parse_value(processed_row_data[-1])
+                            elif len(processed_row_data) > quantity_hdr_idx_p:
+                                quantity = parse_value(processed_row_data[quantity_hdr_idx_p])
+
+                            if quantity <= 0: continue
+
+                            rebar_match = re.search(rebar_pattern, search_text, re.IGNORECASE)
+                            if rebar_match:
+                                diameter = rebar_match.group(1).replace(',', '.'); length_mm = parse_value(rebar_match.group(2))
+                                if length_mm > 0: file_data[f"Арматура d {diameter}"] += (length_mm / 1000) * quantity
+                                continue
+
+                            profile_l_match = re.search(profile_with_l_pattern, search_text, re.IGNORECASE)
+                            if profile_l_match:
+                                profile_name = profile_l_match.group(1).replace(',', '.').replace(' ', ''); length_mm = parse_value(profile_l_match.group(2))
+                                if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
+                                continue
+
+                            if length_col_idx_p is not None and len(processed_row_data) > length_col_idx_p:
+                                profile_std_match = re.search(standard_profile_pattern, search_text)
+                                if profile_std_match:
+                                    profile_name = profile_std_match.group(1).replace(',', '.').replace(' ', '')
+                                    length_mm = parse_value(processed_row_data[length_col_idx_p])
+                                    if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
+                    # --- Конец вставленного кода ---
+
+                except Exception as e_table:
+                    # Логирование ошибок внутри таблицы можно улучшить, если передавать логгер
+                    print(f"Пропущена таблица в {os.path.basename(file_path)} из-за ошибки: {e_table}")
+                    continue
+
+        except Exception as e_doc:
+            error_message = f"Ошибка при обработке DOC: {os.path.basename(file_path)} ({e_doc})"
+        finally:
+            if doc:
+                doc.Saved = True
+                doc.Close(SaveChanges=False)
+
+    except Exception as e_main:
+        error_message = f"Критическая ошибка в потоке для {os.path.basename(file_path)}: {e_main}"
+    finally:
+        if word_app:
+            word_app.Quit(SaveChanges=False)
+        pythoncom.CoUninitialize()  # Очистка COM в этом потоке
+
+    return file_path, file_data, error_message
 
 class ParserApp(tk.Tk):
     def __init__(self):
@@ -73,9 +198,6 @@ class ParserApp(tk.Tk):
             self.log(f"Выбрана папка: {path}")
 
     def on_closing(self):
-        if self.word_app:
-            try: self.word_app.Quit(SaveChanges=False)
-            except Exception as e: print(f"Ошибка при закрытии MS Word: {e}")
         self.destroy()
 
     def _process_row(self, row_data, column_indices, file_data):
@@ -148,44 +270,77 @@ class ParserApp(tk.Tk):
             return
         self.results_text.config(state="normal"); self.results_text.delete('1.0', tk.END); self.results_text.config(state="disabled")
         self.run_button.config(state="disabled")
+
         master_data = defaultdict(lambda: defaultdict(float))
         grand_total_data = defaultdict(float)
+
         self.log(f"Начинаю поиск файлов c '{FILENAME_FILTER_KEYWORD}' в названии (глубина 2)...")
         try:
-            processed_files = []
-            ### ИЗМЕНЕНИЕ: Логика поиска с глубиной 2 ###
-            # Уровень 1: выбранная папка
+            all_files = []
+            # Логика поиска с глубиной 2
             for item_name in os.listdir(start_path):
                 item_path = os.path.join(start_path, item_name)
-                # Если это файл, проверяем и добавляем
                 if os.path.isfile(item_path):
                     if FILENAME_FILTER_KEYWORD in item_name.lower() and not item_name.startswith('~'):
-                        processed_files.append(item_path)
-                # Если это папка, заходим внутрь (Уровень 2)
+                        all_files.append(item_path)
                 elif os.path.isdir(item_path):
-                    # Проходим по файлам во вложенной папке
                     for sub_item_name in os.listdir(item_path):
                         sub_item_path = os.path.join(item_path, sub_item_name)
                         if os.path.isfile(sub_item_path):
                             if FILENAME_FILTER_KEYWORD in sub_item_name.lower() and not sub_item_name.startswith('~'):
-                                processed_files.append(sub_item_path)
+                                all_files.append(sub_item_path)
 
-            processed_files.sort(key=natural_sort_key)
+            all_files.sort(key=natural_sort_key)
 
-            for file_path in processed_files:
+            # Разделяем файлы на .doc и остальные
+            doc_files = [p for p in all_files if p.lower().endswith('.doc')]
+            other_files = [p for p in all_files if not p.lower().endswith('.doc')]
+
+            # 1. ОБРАБОТКА .DOC ФАЙЛОВ В НЕСКОЛЬКО ПОТОКОВ
+            if doc_files:
+                self.log(f"\nНачинаю параллельную обработку {len(doc_files)} файлов .doc...")
+                # Ограничиваем количество потоков, чтобы не перегружать систему. os.cpu_count() или фиксированное число.
+                max_workers = min(len(doc_files), (os.cpu_count() or 1) * 2)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Запускаем задачи
+                    future_to_path = {executor.submit(parse_doc_in_thread, path): path for path in doc_files}
+
+                    for future in concurrent.futures.as_completed(future_to_path):
+                        path = future_to_path[future]
+                        relative_path = os.path.relpath(path, start_path)
+                        try:
+                            file_path_res, file_specific_data, error_message = future.result()
+
+                            self.log(f"\n[DOC] Обработка завершена: {relative_path}")
+                            if error_message:
+                                self.log(f"  > {error_message}")
+
+                            if file_specific_data:
+                                master_data[relative_path] = file_specific_data
+                                for material, length in file_specific_data.items():
+                                    grand_total_data[material] += length
+
+                        except Exception as exc:
+                            self.log(f"\n[DOC] КРИТИЧЕСКАЯ ОШИБКА при обработке файла {relative_path}: {exc}")
+
+            # 2. ПОСЛЕДОВАТЕЛЬНАЯ ОБРАБОТКА ОСТАЛЬНЫХ ФАЙЛОВ (.XLSX, .DOCX)
+            for file_path in other_files:
                 relative_path = os.path.relpath(file_path, start_path)
                 file_ext = os.path.splitext(file_path)[1].lower()
                 self.log(f"\n[{file_ext.upper().replace('.', '')}] Обработка: {relative_path}")
+
                 file_specific_data = defaultdict(float)
-                if file_ext == '.xlsx': self.parse_xlsx(file_path, file_specific_data)
-                elif file_ext == '.docx': self.parse_docx(file_path, file_specific_data)
-                elif file_ext == '.doc': self.parse_doc(file_path, file_specific_data)
+                if file_ext == '.xlsx':
+                    self.parse_xlsx(file_path, file_specific_data)
+                elif file_ext == '.docx':
+                    self.parse_docx(file_path, file_specific_data)
 
                 if file_specific_data:
                     master_data[relative_path] = file_specific_data
                     for material, length in file_specific_data.items():
                         grand_total_data[material] += length
 
+            # 3. ВЫВОД РЕЗУЛЬТАТОВ (остается без изменений)
             self.log("\n-------------------------------------------")
             self.log("--- РАСЧЕТ ПО КАЖДОМУ ФАЙЛУ ---")
 
