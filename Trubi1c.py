@@ -362,8 +362,9 @@ class ParserApp(tk.Tk):
                             self.log(f"{i}. {material} {length_str}м")
                         else:
                             self.log(f"{i}. Наименование: {material}")
-                            self.log(f"   - Суммарная длина (без запаса): {total_length:.3f} м")
+                            self.log(f"   -")
                             self.log(f"   - Итоговая длина с запасом ({CONTINGENCY_PERCENTAGE}%): {final_length_with_contingency:.3f} м")
+                            self.log(f"   -")
 
             self.log("\n\n###########################################")
             self.log("--- ОБЩИЙ ИТОГ ПО ВСЕМ ФАЙЛАМ ---")
