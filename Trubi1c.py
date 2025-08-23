@@ -44,13 +44,11 @@ def natural_sort_key(s):
 def parse_doc_in_thread(file_path):
     """
     Обрабатывает один .doc файл в отдельном потоке, создавая свой экземпляр Word.
-    Возвращает кортеж из пути к файлу, словаря с данными и вложенного словаря по трубам 102.
+    Возвращает кортеж из пути к файлу и словаря с данными.
     """
-    pythoncom.CoInitialize()
+    pythoncom.CoInitialize()  # Инициализация COM в этом потоке
     word_app = None
     file_data = defaultdict(float)
-    # Структура: {'Труба 102x3.5': {12000: 5, 6000: 2}}
-    pipe_102_data_local = defaultdict(lambda: defaultdict(int))
     error_message = None
 
     try:
@@ -75,10 +73,12 @@ def parse_doc_in_thread(file_path):
                     column_indices = find_columns_indices(header_values)
 
                     if column_indices.get('name') is not None and column_indices.get('quantity') is not None:
+                        # Вспомогательная функция для итерации по COM-коллекции
                         def com_rows_iterator():
                             for i in range(2, table.Rows.Count + 1):
                                 yield [cell.Range.Text.strip('\r\x07 ').strip() for cell in table.Rows(i).Cells]
 
+                        # Внутренняя функция для обработки строк (аналог _process_table_iterator)
                         last_material_name = ""
                         name_idx = column_indices['name']
                         for row_data in com_rows_iterator():
@@ -93,6 +93,8 @@ def parse_doc_in_thread(file_path):
                             else:
                                 processed_row_data[name_idx] = last_material_name
 
+                            # Внутренняя функция для обработки одной строки (аналог _process_row)
+                            # --- Код из _process_row вставлен сюда для простоты ---
                             name_idx_p, material_idx_p, length_col_idx_p, quantity_hdr_idx_p = (
                                 column_indices.get('name'), column_indices.get('material'),
                                 column_indices.get('length'), column_indices.get('quantity')
@@ -108,35 +110,18 @@ def parse_doc_in_thread(file_path):
 
                             if EXCLUDE_KEYWORD in search_text.lower(): continue
 
+                            rebar_pattern = r'[АаAa][54]00[СсСc]?.*?(?:диаметр|d|D|⌀|ø)\s*(\d+(?:,\d+)?).*?L\s*=\s*(\d+)'
+                            profile_with_l_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2}).*?L\s*=\s*(\d+)'
+                            standard_profile_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2})'
                             quantity = 0
                             is_short_row = "L=" in name_content.upper() and len(processed_row_data) < quantity_hdr_idx_p
+
                             if is_short_row:
                                 if len(processed_row_data) > 1: quantity = parse_value(processed_row_data[-1])
                             elif len(processed_row_data) > quantity_hdr_idx_p:
                                 quantity = parse_value(processed_row_data[quantity_hdr_idx_p])
 
                             if quantity <= 0: continue
-
-                            pipe_profile_pattern = r'(102\s*[xх*]\s*\d+(?:[.,]\d+)?)'
-                            pipe_match = re.search(pipe_profile_pattern, search_text, re.IGNORECASE)
-                            if pipe_match and ('труб' in search_text.lower() or 'тр.' in search_text.lower()):
-                                profile_name = pipe_match.group(1).lower().replace(',', '.').replace(' ', '').replace('*', 'x')
-                                spec_key = f"Труба {profile_name}"
-                                length_mm = 0
-                                l_match = re.search(r'L\s*=\s*(\d+)', search_text, re.IGNORECASE)
-                                if l_match:
-                                    length_mm = parse_value(l_match.group(1))
-                                elif length_col_idx_p is not None and len(processed_row_data) > length_col_idx_p:
-                                    length_mm = parse_value(processed_row_data[length_col_idx_p])
-
-                                if length_mm > 0:
-                                    pipe_102_data_local[spec_key][int(length_mm)] += int(quantity)
-                                    file_data[spec_key] += (length_mm / 1000) * quantity
-                                    continue
-
-                            rebar_pattern = r'[АаAa][54]00[СсСc]?.*?(?:диаметр|d|D|⌀|ø)\s*(\d+(?:,\d+)?).*?L\s*=\s*(\d+)'
-                            profile_with_l_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2}).*?L\s*=\s*(\d+)'
-                            standard_profile_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2})'
 
                             rebar_match = re.search(rebar_pattern, search_text, re.IGNORECASE)
                             if rebar_match:
@@ -147,7 +132,7 @@ def parse_doc_in_thread(file_path):
                             profile_l_match = re.search(profile_with_l_pattern, search_text, re.IGNORECASE)
                             if profile_l_match:
                                 profile_name = profile_l_match.group(1).replace(',', '.').replace(' ', ''); length_mm = parse_value(profile_l_match.group(2))
-                                if length_mm > 0: file_data[f"Профиль {profile_name}"] += (length_mm / 1000) * quantity
+                                if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
                                 continue
 
                             if length_col_idx_p is not None and len(processed_row_data) > length_col_idx_p:
@@ -155,33 +140,37 @@ def parse_doc_in_thread(file_path):
                                 if profile_std_match:
                                     profile_name = profile_std_match.group(1).replace(',', '.').replace(' ', '')
                                     length_mm = parse_value(processed_row_data[length_col_idx_p])
-                                    if length_mm > 0: file_data[f"Профиль {profile_name}"] += (length_mm / 1000) * quantity
+                                    if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
+                    # --- Конец вставленного кода ---
+
                 except Exception as e_table:
+                    # Логирование ошибок внутри таблицы можно улучшить, если передавать логгер
                     print(f"Пропущена таблица в {os.path.basename(file_path)} из-за ошибки: {e_table}")
                     continue
+
         except Exception as e_doc:
             error_message = f"Ошибка при обработке DOC: {os.path.basename(file_path)} ({e_doc})"
         finally:
             if doc:
                 doc.Saved = True
                 doc.Close(SaveChanges=False)
+
     except Exception as e_main:
         error_message = f"Критическая ошибка в потоке для {os.path.basename(file_path)}: {e_main}"
     finally:
         if word_app:
             word_app.Quit(SaveChanges=False)
-        pythoncom.CoUninitialize()
+        pythoncom.CoUninitialize()  # Очистка COM в этом потоке
 
-    return file_path, file_data, pipe_102_data_local, error_message
+    return file_path, file_data, error_message
 
 class ParserApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Универсальный парсер журналов v10.8 (Глубина поиска 2)")
+        self.title("Универсальный парсер журналов v10.5 (Глубина поиска 2)")
         self.geometry("800x600")
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.word_app = None
-        self.pipe_102_data = defaultdict(lambda: defaultdict(int))
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill="both", expand=True)
         top_frame = ttk.Frame(main_frame)
@@ -227,36 +216,19 @@ class ParserApp(tk.Tk):
 
         if EXCLUDE_KEYWORD in search_text.lower(): return
 
+        rebar_pattern = r'[АаAa][54]00[СсСc]?.*?(?:диаметр|d|D|⌀|ø)\s*(\d+(?:,\d+)?).*?L\s*=\s*(\d+)'
+        profile_with_l_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2}).*?L\s*=\s*(\d+)'
+        standard_profile_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2})'
+
         quantity = 0
         is_short_row = "L=" in name_content.upper() and len(row_data) < quantity_hdr_idx
+
         if is_short_row:
             if len(row_data) > 1: quantity = parse_value(row_data[-1])
         elif len(row_data) > quantity_hdr_idx:
             quantity = parse_value(row_data[quantity_hdr_idx])
 
         if quantity <= 0: return
-
-        # --- ОБНОВЛЕННАЯ ЛОГИКА ДЛЯ ИЗВЛЕЧЕНИЯ ПРОФИЛЯ ТРУБЫ ---
-        pipe_profile_pattern = r'(102\s*[xх*]\s*\d+(?:[.,]\d+)?)'
-        pipe_match = re.search(pipe_profile_pattern, search_text, re.IGNORECASE)
-        if pipe_match and ('труб' in search_text.lower() or 'тр.' in search_text.lower()):
-            profile_name = pipe_match.group(1).lower().replace(',', '.').replace(' ', '').replace('*', 'x')
-            spec_key = f"Труба {profile_name}"
-            length_mm = 0
-            l_match = re.search(r'L\s*=\s*(\d+)', search_text, re.IGNORECASE)
-            if l_match:
-                length_mm = parse_value(l_match.group(1))
-            elif length_col_idx is not None and len(row_data) > length_col_idx:
-                length_mm = parse_value(row_data[length_col_idx])
-
-            if length_mm > 0:
-                self.pipe_102_data[spec_key][int(length_mm)] += int(quantity)
-                file_data[spec_key] += (length_mm / 1000) * quantity
-                return
-
-        rebar_pattern = r'[АаAa][54]00[СсСc]?.*?(?:диаметр|d|D|⌀|ø)\s*(\d+(?:,\d+)?).*?L\s*=\s*(\d+)'
-        profile_with_l_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2}).*?L\s*=\s*(\d+)'
-        standard_profile_pattern = r'(\d+(?:,\d+)?(?:\s*[хx]\s*\d+(?:,\d+)?){1,2})'
 
         rebar_match = re.search(rebar_pattern, search_text, re.IGNORECASE)
         if rebar_match:
@@ -267,7 +239,7 @@ class ParserApp(tk.Tk):
         profile_l_match = re.search(profile_with_l_pattern, search_text, re.IGNORECASE)
         if profile_l_match:
             profile_name = profile_l_match.group(1).replace(',', '.').replace(' ', ''); length_mm = parse_value(profile_l_match.group(2))
-            if length_mm > 0: file_data[f"Профиль {profile_name}"] += (length_mm / 1000) * quantity
+            if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
             return
 
         if length_col_idx is not None and len(row_data) > length_col_idx:
@@ -275,7 +247,7 @@ class ParserApp(tk.Tk):
             if profile_std_match:
                 profile_name = profile_std_match.group(1).replace(',', '.').replace(' ', '')
                 length_mm = parse_value(row_data[length_col_idx])
-                if length_mm > 0: file_data[f"Профиль {profile_name}"] += (length_mm / 1000) * quantity
+                if length_mm > 0: file_data[profile_name] += (length_mm / 1000) * quantity
 
     def _process_table_iterator(self, rows_iterator, column_indices, file_data):
         last_material_name = ""
@@ -301,11 +273,11 @@ class ParserApp(tk.Tk):
 
         master_data = defaultdict(lambda: defaultdict(float))
         grand_total_data = defaultdict(float)
-        self.pipe_102_data.clear()
 
         self.log(f"Начинаю поиск файлов c '{FILENAME_FILTER_KEYWORD}' в названии (глубина 2)...")
         try:
             all_files = []
+            # Логика поиска с глубиной 2
             for item_name in os.listdir(start_path):
                 item_path = os.path.join(start_path, item_name)
                 if os.path.isfile(item_path):
@@ -320,47 +292,58 @@ class ParserApp(tk.Tk):
 
             all_files.sort(key=natural_sort_key)
 
+            # Разделяем файлы на .doc и остальные
             doc_files = [p for p in all_files if p.lower().endswith('.doc')]
             other_files = [p for p in all_files if not p.lower().endswith('.doc')]
 
+            # 1. ОБРАБОТКА .DOC ФАЙЛОВ В НЕСКОЛЬКО ПОТОКОВ
             if doc_files:
                 self.log(f"\nНачинаю параллельную обработку {len(doc_files)} файлов .doc...")
+                # Ограничиваем количество потоков, чтобы не перегружать систему. os.cpu_count() или фиксированное число.
                 max_workers = min(len(doc_files), (os.cpu_count() or 1) * 2)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Запускаем задачи
                     future_to_path = {executor.submit(parse_doc_in_thread, path): path for path in doc_files}
+
                     for future in concurrent.futures.as_completed(future_to_path):
                         path = future_to_path[future]
                         relative_path = os.path.relpath(path, start_path)
                         try:
-                            file_path_res, file_specific_data, pipe_data_from_file, error_message = future.result()
+                            file_path_res, file_specific_data, error_message = future.result()
+
                             self.log(f"\n[DOC] Обработка завершена: {relative_path}")
-                            if error_message: self.log(f"  > {error_message}")
-                            if pipe_data_from_file:
-                                # Мержим вложенные словари
-                                for profile, length_counts in pipe_data_from_file.items():
-                                    for length, count in length_counts.items():
-                                        self.pipe_102_data[profile][length] += count
+                            if error_message:
+                                self.log(f"  > {error_message}")
+
                             if file_specific_data:
                                 master_data[relative_path] = file_specific_data
                                 for material, length in file_specific_data.items():
                                     grand_total_data[material] += length
+
                         except Exception as exc:
                             self.log(f"\n[DOC] КРИТИЧЕСКАЯ ОШИБКА при обработке файла {relative_path}: {exc}")
 
+            # 2. ПОСЛЕДОВАТЕЛЬНАЯ ОБРАБОТКА ОСТАЛЬНЫХ ФАЙЛОВ (.XLSX, .DOCX)
             for file_path in other_files:
                 relative_path = os.path.relpath(file_path, start_path)
                 file_ext = os.path.splitext(file_path)[1].lower()
                 self.log(f"\n[{file_ext.upper().replace('.', '')}] Обработка: {relative_path}")
+
                 file_specific_data = defaultdict(float)
-                if file_ext == '.xlsx': self.parse_xlsx(file_path, file_specific_data)
-                elif file_ext == '.docx': self.parse_docx(file_path, file_specific_data)
+                if file_ext == '.xlsx':
+                    self.parse_xlsx(file_path, file_specific_data)
+                elif file_ext == '.docx':
+                    self.parse_docx(file_path, file_specific_data)
+
                 if file_specific_data:
                     master_data[relative_path] = file_specific_data
                     for material, length in file_specific_data.items():
                         grand_total_data[material] += length
 
+            # 3. ВЫВОД РЕЗУЛЬТАТОВ (остается без изменений)
             self.log("\n-------------------------------------------")
             self.log("--- РАСЧЕТ ПО КАЖДОМУ ФАЙЛУ ---")
+
             if not master_data:
                 self.log(f"Материалы не найдены.")
             else:
@@ -371,14 +354,22 @@ class ParserApp(tk.Tk):
                         self.log("  > В этом файле не найдено подходящих материалов.")
                         continue
                     sorted_materials = sorted(file_data.items(), key=lambda item: natural_sort_key(item[0]))
+
                     for i, (material, total_length) in enumerate(sorted_materials, 1):
                         final_length_with_contingency = total_length * (1 + CONTINGENCY_PERCENTAGE / 100)
-                        length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
-                        self.log(f"{i}. {material}: {length_str} м")
+                        if material.startswith("Арматура d"):
+                            length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
+                            self.log(f"{i}. {material} {length_str}м")
+                        else:
+                            self.log(f"{i}. Наименование: {material}")
+                            self.log(f"   -")
+                            self.log(f"   - Итоговая длина с запасом ({CONTINGENCY_PERCENTAGE}%): {final_length_with_contingency:.3f} м")
+                            self.log(f"   -")
 
             self.log("\n\n###########################################")
             self.log("--- ОБЩИЙ ИТОГ ПО ВСЕМ ФАЙЛАМ ---")
             self.log("###########################################\n")
+
             if not grand_total_data:
                 self.log("Материалы для итогового подсчета не найдены.")
             else:
@@ -386,28 +377,12 @@ class ParserApp(tk.Tk):
                 self.log(f"Общая спецификация (с учетом {CONTINGENCY_PERCENTAGE}% запаса):\n")
                 for i, (material, total_length) in enumerate(sorted_grand_totals, 1):
                     final_length_with_contingency = total_length * (1 + CONTINGENCY_PERCENTAGE / 100)
-                    length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
-                    self.log(f'{i}. {material}: {length_str} м')
-
-            self.log("\n\n###########################################")
-            self.log("--- ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ ПО ТРУБАМ ---")
-            self.log("###########################################\n")
-            if not self.pipe_102_data:
-                self.log("Трубы с диаметром 102 не найдены.")
-            else:
-                total_pipe_count = 0
-                sorted_profiles = sorted(self.pipe_102_data.items(), key=lambda item: natural_sort_key(item[0]))
-                for profile, length_counts in sorted_profiles:
-                    self.log(f"--- {profile} ---")
-                    sorted_lengths = sorted(length_counts.items())
-                    profile_total_count = sum(length_counts.values())
-                    total_pipe_count += profile_total_count
-                    for length, count in sorted_lengths:
-                        length_m = f"{(length / 1000):.3f}".replace('.', ',')
-                        self.log(f"  Длина: {length_m} м - Количество: {count} шт.")
-                    self.log(f"  ИТОГО ({profile}): {profile_total_count} шт.\n")
-                self.log(f"ОБЩИЙ ИТОГ по всем трубам 102: {total_pipe_count} шт.")
-
+                    if material.startswith("Арматура d"):
+                        length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
+                        self.log(f'{i}. {material}: {length_str} м')
+                    else:
+                        length_str = f"{final_length_with_contingency:.3f}".replace('.', ',')
+                        self.log(f'{i}. Профиль {material}: {length_str} м')
 
             self.log("\n\n--- Анализ завершен. ---")
         except Exception as e:
@@ -448,6 +423,33 @@ class ParserApp(tk.Tk):
                     self._process_table_iterator(rows_iterator, column_indices, file_data)
         except Exception as e:
             self.log(f"  > Ошибка при чтении файла DOCX: {os.path.basename(file_path)} ({e})")
+
+    def parse_doc(self, file_path, file_data):
+        if not self.word_app:
+            try:
+                self.word_app = win32.Dispatch("Word.Application")
+                self.word_app.Visible = False; self.word_app.DisplayAlerts = 0; self.word_app.AutomationSecurity = 3
+            except Exception as e: raise Exception(f"Не удалось запустить MS Word: {e}")
+        doc = None
+        try:
+            doc = self.word_app.Documents.Open(os.path.abspath(file_path), ConfirmConversions=False, ReadOnly=True, AddToRecentFiles=False)
+            for table in doc.Tables:
+                try:
+                    header_row = table.Rows(1)
+                    header_values = [cell.Range.Text.strip('\r\x07 ').strip() for cell in header_row.Cells]
+                    column_indices = find_columns_indices(header_values)
+                    if column_indices.get('name') is not None and column_indices.get('quantity') is not None:
+                        def com_rows_iterator():
+                            for i in range(2, table.Rows.Count + 1):
+                                yield [cell.Range.Text.strip('\r\x07 ').strip() for cell in table.Rows(i).Cells]
+                        self._process_table_iterator(com_rows_iterator(), column_indices, file_data)
+                except Exception as e_table:
+                    self.log(f"    > Пропущена таблица в .doc из-за ошибки: {e_table}")
+                    continue
+        except Exception as e:
+            self.log(f"  > Ошибка при обработке DOC: {os.path.basename(file_path)} ({e})")
+        finally:
+            if doc: doc.Saved = True; doc.Close(SaveChanges=False)
 
 if __name__ == "__main__":
     try:
