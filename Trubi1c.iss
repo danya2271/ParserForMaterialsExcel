@@ -7,7 +7,7 @@
 #define MyAppURL "https://github.com/danya2271/ParserForMaterialsExcel"
 #define MyAppExeName "Рассчет труб для 1С.exe"
 #define OtherFiles "C:\GD"
-#define Repo "C:\Trubi1c.dist"
+#define Repo ".\Trubi1c.dist"
 
 [Setup]
 DisableWelcomePage=no
@@ -22,7 +22,7 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-LicenseFile={#Repo}\LICENSE
+LicenseFile=.\LICENSE
 OutputDir="{#OtherFiles}\Релизы\{#MyAppVersion}"
 Compression=lzma
 SolidCompression=yes
