@@ -27,13 +27,13 @@ OutputDir="{#OtherFiles}\Релизы\{#MyAppVersion}"
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-OutputBaseFilename=oint_{#MyAppVersion}_installer
+OutputBaseFilename=Trubi1c_{#MyAppVersion}_installer
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Files]
-Source: "C:\Trubi1c.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: ".\Trubi1c.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Tasks]
 Name: desktopicon; Description: "Создать ярлык на рабочем столе";
